@@ -1,5 +1,8 @@
 """
-MLP baseline for MNIST - the "traditional neural network" in the model comparison.
+MLP for MNIST digits + handwritten operators - the "traditional neural
+network" in the model comparison, trained on the combined 16-class dataset
+(0-9, + - * / ( )) so it can classify anything segment_symbols() crops out
+of a full expression, not just isolated digits.
 
   1. Define the MLP (64 -> 32 -> 16, ReLU, adam, early stopping)
   2. Evaluate: accuracy, weighted F1, classification report
@@ -11,14 +14,16 @@ import os
 import pickle
 import sys
 
+import numpy as np
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import accuracy_score, f1_score, classification_report
+from sklearn.utils.class_weight import compute_sample_weight
 
-# loads "import data_loader" work when this file is run straight from models/.
+# loads "import data_loader" work when this file is run straight from mod--els/.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data_loader import load_data
+from data_loader import load_combined_data, CLASS_NAMES
 
 # --- config ---
 RANDOM_STATE = 42
@@ -42,9 +47,10 @@ def build_mlp():
 
 
 def main():
-    # load_data gives us 28x28 images; the MLP wants each one as a flat 784-vector.
-    # If we're scaling below, load the raw pixels; if not, let load_data do the /255.
-    X_train, y_train, X_test, y_test = load_data(normalize=not USE_SCALER)
+    # load_combined_data gives us 28x28 images (digits + operators); the MLP
+    # wants each one as a flat 784-vector. If we're scaling below, load the
+    # raw pixels; if not, let load_combined_data do the /255.
+    X_train, y_train, X_test, y_test = load_combined_data(normalize=not USE_SCALER)
     X_train = X_train.reshape(X_train.shape[0], -1)
     X_test = X_test.reshape(X_test.shape[0], -1)
 
@@ -56,19 +62,24 @@ def main():
         X_test = scaler.transform(X_test)
 
     # 1. Train
+    # Operator classes have ~25x fewer training examples than digit classes
+    # (see data_loader.load_combined_data) -- MLPClassifier has no
+    # class_weight param, so balanced sample_weight is the equivalent:
+    # up-weights each operator example's contribution to the loss roughly
+    # in proportion to how under-represented its class is.
+    sample_weight = compute_sample_weight('balanced', y_train)
     mlp_clf = build_mlp()
-    mlp_clf.fit(X_train, y_train)
+    mlp_clf.fit(X_train, y_train, sample_weight=sample_weight)
 
     # 2. Score on the test set
     y_pred = mlp_clf.predict(X_test)
     acc = accuracy_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred, average='weighted')
 
-    digit_names = [str(i) for i in range(10)]
     print(f'MLP Classifier - Accuracy: {acc:.4f} | Weighted F1: {f1:.4f}')
     print(f'Training stopped at iteration: {mlp_clf.n_iter_}')
     print('\nClassification Report:')
-    print(classification_report(y_test, y_pred, target_names=digit_names))
+    print(classification_report(y_test, y_pred, target_names=CLASS_NAMES))
 
     # 3. Cross-validation on a stratified slice of the training data
     if RUN_CV:
@@ -81,11 +92,18 @@ def main():
                 random_state=RANDOM_STATE,
             )
 
+        # cross_val_score doesn't pass sample_weight through to fit() without
+        # opting into sklearn's experimental metadata-routing config, so the
+        # folds are run by hand here instead.
         skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
-        # Run folds one at a time. Parallel mode prints a wall of harmless
-        cv_scores = cross_val_score(
-            build_mlp(), X_cv, y_cv, cv=skf, scoring='f1_weighted', n_jobs=1
-        )
+        cv_scores = []
+        for train_idx, val_idx in skf.split(X_cv, y_cv):
+            fold_weight = compute_sample_weight('balanced', y_cv[train_idx])
+            fold_clf = build_mlp()
+            fold_clf.fit(X_cv[train_idx], y_cv[train_idx], sample_weight=fold_weight)
+            fold_pred = fold_clf.predict(X_cv[val_idx])
+            cv_scores.append(f1_score(y_cv[val_idx], fold_pred, average='weighted'))
+        cv_scores = np.array(cv_scores)
         print(
             f'\n5-fold CV (weighted F1, n={len(X_cv)}): '
             f'mean {cv_scores.mean():.4f} (std {cv_scores.std():.4f})'

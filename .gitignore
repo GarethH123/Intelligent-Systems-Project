@@ -1,1 +1,4 @@
 data/*.csv
+data/operators/
+__pycache__/
+*.pyc
