@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 import pandas as pd
 
+from mnist_format import INK_FLOOR, to_mnist_format
+
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 TRAIN_PATH = os.path.join(DATA_DIR, "mnist_train.csv")
 TEST_PATH = os.path.join(DATA_DIR, "mnist_test.csv")
@@ -44,15 +46,14 @@ def load_data(normalize: bool = True):
 
 
 def _image_to_mnist_style(img: np.ndarray, size: int = 28) -> np.ndarray:
-    """Resize an operator crop to match MNIST's look (28x28, ink=255 on black)."""
+    """Put an operator crop in MNIST's format: ink bright on black, longest
+    side scaled to 20 px, centred by centre of mass in 28x28, grey edges kept.
+    The same function formats the crops from segmentation at run time.
+    """
     # kaggle crops are dark ink on white, opposite of MNIST, so flip if needed
     if img.mean() > 127:
         img = 255 - img
-    # resize before thresholding, not after -- otherwise thin strokes like a
-    # '-' get averaged away during the downscale and just disappear
-    resized = cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA)
-    _, binary = cv2.threshold(resized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return binary
+    return to_mnist_format(img, size=size)
 
 
 def load_operator_data(test_fraction: float = 0.2, seed: int = 42,
@@ -87,7 +88,7 @@ def load_operator_data(test_fraction: float = 0.2, seed: int = 42,
             if img is None:
                 continue
             normalized = _image_to_mnist_style(img)
-            if (normalized > 127).sum() < min_ink_px:
+            if (normalized > INK_FLOOR).sum() < min_ink_px:
                 continue
             images.append(normalized)
 
