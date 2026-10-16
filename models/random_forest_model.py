@@ -15,7 +15,7 @@ from data_loader import load_data
 RANDOM_STATE = 42
 RUN_CV = True         # set False to skip cross-validation and just train once
 CV_SUBSET = 20000     # training rows to use for CV (None = all 60k, much slower)
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rf_model.pkl")
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "random_forest_model.pkl")
 
 
 def build_rf():
