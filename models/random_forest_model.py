@@ -1,15 +1,27 @@
+"""
+Random Forest for MNIST digits + handwritten operators - the tree-based model
+in the comparison, trained on the same combined 16-class dataset (0-9,
++ - * / ( )) as the MLP and CNN and scored with the same evaluation
+(models/evaluation.py).
 
+  1. Define the forest (200 trees, sqrt features, out-of-bag score)
+  2. Evaluate: accuracy, weighted F1, classification report, confusion matrix
+  3. Cross-validate: 5-fold stratified, weighted F1
+  4. Save the fitted model to models/random_forest_model.pkl
+
+"""
 import os
 import pickle
 import sys
 
+import numpy as np
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
-from sklearn.metrics import accuracy_score, f1_score, classification_report
+from sklearn.utils.class_weight import compute_sample_weight
 
-# imports data_loader.
+# lets "import data_loader" work when this file is run straight from models/.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data_loader import load_data
+from data_loader import load_combined_data, CLASS_NAMES
+from evaluation import cross_validate, evaluate, plot_history
 
 # --- config ---
 RANDOM_STATE = 42
@@ -32,49 +44,52 @@ def build_rf():
     )
 
 
+def accuracy_by_tree_count(clf, X, y):
+    """Accuracy of the forest as trees are added one at a time. A forest has no
+    epochs, so this is its version of a training curve: it shows where adding
+    more trees stops helping.
+    """
+    X = X.astype(np.float32)
+    summed_proba = np.zeros((len(X), len(clf.classes_)))
+    accuracies = []
+    for tree in clf.estimators_:
+        summed_proba += tree.predict_proba(X)
+        accuracies.append((clf.classes_[summed_proba.argmax(axis=1)] == y).mean())
+    return accuracies
+
+
 def main():
-    # load_data gives 28x28 images; the forest wants each one as a flat 784-vector as it cannot directly accept multi-dimensional input arrays.
-    X_train, y_train, X_test, y_test = load_data(normalize=True)
+    # load_combined_data gives 28x28 images (digits + operators); the forest wants
+    # each one as a flat 784-vector as it cannot directly accept multi-dimensional
+    # input arrays. Raw 0-255 pixels (no scaling) because that is what app.py feeds
+    # saved .pkl models, and trees don't care about the scale anyway.
+    X_train, y_train, X_test, y_test = load_combined_data(normalize=False)
     X_train = X_train.reshape(X_train.shape[0], -1)
     X_test = X_test.reshape(X_test.shape[0], -1)
 
     # 1. Train
+    # Same class balancing as the MLP and CNN: operators have far fewer
+    # examples than digits, so up-weight them.
     rf_clf = build_rf()
-    rf_clf.fit(X_train, y_train)
+    rf_clf.fit(X_train, y_train, sample_weight=compute_sample_weight('balanced', y_train))
 
     # 2. Score on the test set
     y_pred = rf_clf.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred, average='weighted')
-
-    digit_names = [str(i) for i in range(10)]
-    print(f'Random Forest - Accuracy: {acc:.4f} | Weighted F1: {f1:.4f}')
+    evaluate('RandomForest', y_test, y_pred, CLASS_NAMES)
+    plot_history('RandomForest', val_acc=accuracy_by_tree_count(rf_clf, X_test, y_test),
+                 xlabel='trees', val_label='test')
     print(f'Out-of-bag score: {rf_clf.oob_score_:.4f}')
-    print('\nClassification Report:')
-    print(classification_report(y_test, y_pred, target_names=digit_names))
 
     # 3. Cross-validation on a stratified slice of the training data
     if RUN_CV:
-        X_cv, y_cv = X_train, y_train
-        if CV_SUBSET and CV_SUBSET < len(X_train):
-            X_cv, _, y_cv, _ = train_test_split(
-                X_train, y_train,
-                train_size=CV_SUBSET,
-                stratify=y_train,
-                random_state=RANDOM_STATE,
-            )
+        def fit_predict(X_tr, y_tr, X_val):
+            fold_clf = build_rf()
+            fold_clf.fit(X_tr, y_tr, sample_weight=compute_sample_weight('balanced', y_tr))
+            return fold_clf.predict(X_val)
 
-        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
-        # Folds run one at a time; stratifiess folds 5 times over based of n_split.
-        cv_scores = cross_val_score(
-            build_rf(), X_cv, y_cv, cv=skf, scoring='f1_weighted', n_jobs=1
-        )
-        print(
-            f'\n5-fold CV (weighted F1, n={len(X_cv)}): '
-            f'mean {cv_scores.mean():.4f} (std {cv_scores.std():.4f})'
-        )
+        cross_validate('RandomForest', fit_predict, X_train, y_train, subset=CV_SUBSET, seed=RANDOM_STATE)
 
-    # 4. Save the model (scaler is None - trees don't need one, but kept there just in case to be consistent with other models potentially)
+    # 4. Save the model (scaler is None - trees don't need one, but kept there to match the other models)
     with open(MODEL_PATH, 'wb') as fh:
         pickle.dump({'model': rf_clf, 'scaler': None}, fh)
     print(f'\nSaved fitted model to {MODEL_PATH}')

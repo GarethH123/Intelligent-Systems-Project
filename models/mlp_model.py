@@ -5,7 +5,8 @@ network" in the model comparison, trained on the combined 16-class dataset
 of a full expression, not just isolated digits.
 
   1. Define the MLP (64 -> 32 -> 16, ReLU, adam, early stopping)
-  2. Evaluate: accuracy, weighted F1, classification report
+  2. Evaluate: accuracy, weighted F1, classification report, confusion matrix
+     and training curves (same evaluation as the CNN, see models/evaluation.py)
   3. Cross-validate: 5-fold stratified, weighted F1
   4. Save the fitted model (and scaler) to models/mlp_model.pkl
 
@@ -14,16 +15,14 @@ import os
 import pickle
 import sys
 
-import numpy as np
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import StratifiedKFold, train_test_split
-from sklearn.metrics import accuracy_score, f1_score, classification_report
 from sklearn.utils.class_weight import compute_sample_weight
 
 # loads "import data_loader" work when this file is run straight from mod--els/.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data_loader import load_combined_data, CLASS_NAMES
+from evaluation import cross_validate, evaluate, plot_history
 
 # --- config ---
 RANDOM_STATE = 42
@@ -73,41 +72,22 @@ def main():
 
     # 2. Score on the test set
     y_pred = mlp_clf.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred, average='weighted')
-
-    print(f'MLP Classifier - Accuracy: {acc:.4f} | Weighted F1: {f1:.4f}')
+    evaluate('MLP', y_test, y_pred, CLASS_NAMES)
     print(f'Training stopped at iteration: {mlp_clf.n_iter_}')
-    print('\nClassification Report:')
-    print(classification_report(y_test, y_pred, target_names=CLASS_NAMES))
+    # sklearn only keeps the training loss and the validation accuracy per iteration
+    plot_history('MLP', loss=mlp_clf.loss_curve_, val_acc=mlp_clf.validation_scores_)
 
     # 3. Cross-validation on a stratified slice of the training data
     if RUN_CV:
-        X_cv, y_cv = X_train, y_train
-        if CV_SUBSET and CV_SUBSET < len(X_train):
-            X_cv, _, y_cv, _ = train_test_split(
-                X_train, y_train,
-                train_size=CV_SUBSET,
-                stratify=y_train,
-                random_state=RANDOM_STATE,
-            )
-
         # cross_val_score doesn't pass sample_weight through to fit() without
-        # opting into sklearn's experimental metadata-routing config, so the
-        # folds are run by hand here instead.
-        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
-        cv_scores = []
-        for train_idx, val_idx in skf.split(X_cv, y_cv):
-            fold_weight = compute_sample_weight('balanced', y_cv[train_idx])
+        # opting into sklearn's experimental metadata-routing config, so each
+        # fold is trained by hand.
+        def fit_predict(X_tr, y_tr, X_val):
             fold_clf = build_mlp()
-            fold_clf.fit(X_cv[train_idx], y_cv[train_idx], sample_weight=fold_weight)
-            fold_pred = fold_clf.predict(X_cv[val_idx])
-            cv_scores.append(f1_score(y_cv[val_idx], fold_pred, average='weighted'))
-        cv_scores = np.array(cv_scores)
-        print(
-            f'\n5-fold CV (weighted F1, n={len(X_cv)}): '
-            f'mean {cv_scores.mean():.4f} (std {cv_scores.std():.4f})'
-        )
+            fold_clf.fit(X_tr, y_tr, sample_weight=compute_sample_weight('balanced', y_tr))
+            return fold_clf.predict(X_val)
+
+        cross_validate('MLP', fit_predict, X_train, y_train, subset=CV_SUBSET, seed=RANDOM_STATE)
 
     # 4. Save the model and scaler together, since predictions later need both
     with open(MODEL_PATH, 'wb') as fh:

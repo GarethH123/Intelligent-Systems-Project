@@ -56,16 +56,34 @@ def _image_to_mnist_style(img: np.ndarray, size: int = 28) -> np.ndarray:
     return to_mnist_format(img, size=size)
 
 
+def _augment(img: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Random variation of one 28x28 operator image: stroke thickness (0-2
+    dilations), a small rotation, scale and shift. Training operators come out
+    of to_mnist_format as hairlines while real pen strokes are much bolder, and
+    without this the models learn 'thin = operator, thick = digit'.
+    """
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    img = cv2.dilate(img, kernel, iterations=int(rng.integers(0, 3)))
+    m = cv2.getRotationMatrix2D((14, 14), rng.uniform(-10, 10), rng.uniform(0.9, 1.1))
+    m[:, 2] += rng.integers(-2, 3, size=2)
+    return cv2.warpAffine(img, m, (28, 28))
+
+
 def load_operator_data(test_fraction: float = 0.2, seed: int = 42,
-                        operator_dir: str = OPERATOR_DIR, min_ink_px: int = 15):
+                        operator_dir: str = OPERATOR_DIR, min_ink_px: int = 15,
+                        augment_copies: int = 2):
     """Loads operator images from data/operators/<folder>/*.png and splits
     each class into train/test. Labels are 10-15, in OPERATOR_CLASSES order.
+
+    augment_copies adds that many randomly varied copies (see _augment) of every
+    TRAINING image; the test split is never augmented. 0 turns it off.
 
     min_ink_px throws out crops that end up basically blank after resizing --
     we were seeing bad '+' recall traced back to a bunch of these near-empty
     images in training.
     """
     rng = np.random.default_rng(seed)
+    aug_rng = np.random.default_rng(seed + 1)  # separate, so the train/test split doesn't depend on augmentation
     train_images, train_labels = [], []
     test_images, test_labels = [], []
 
@@ -98,6 +116,10 @@ def load_operator_data(test_fraction: float = 0.2, seed: int = 42,
 
         train_images.extend(images[i] for i in train_idx)
         train_labels.extend([label] * len(train_idx))
+        for i in train_idx:
+            for _ in range(augment_copies):
+                train_images.append(_augment(images[i], aug_rng))
+                train_labels.append(label)
         test_images.extend(images[i] for i in test_idx)
         test_labels.extend([label] * len(test_idx))
 
@@ -108,13 +130,13 @@ def load_operator_data(test_fraction: float = 0.2, seed: int = 42,
     return X_train, y_train, X_test, y_test
 
 
-def load_combined_data(normalize: bool = True, seed: int = 42):
+def load_combined_data(normalize: bool = True, seed: int = 42, augment_copies: int = 2):
     """Combines MNIST digits (0-9) with the operator symbols (10-15) into
     one dataset, so the classifier can recognise anything segment_symbols()
     hands it from a full expression.
     """
     digit_X_train, digit_y_train, digit_X_test, digit_y_test = load_data(normalize=False)
-    op_X_train, op_y_train, op_X_test, op_y_test = load_operator_data(seed=seed)
+    op_X_train, op_y_train, op_X_test, op_y_test = load_operator_data(seed=seed, augment_copies=augment_copies)
 
     # shuffle so operators aren't all bunched at the end of the array
     rng = np.random.default_rng(seed)

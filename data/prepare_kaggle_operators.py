@@ -14,6 +14,7 @@ Usage:
     python data/prepare_kaggle_operators.py
 """
 import os
+import random
 import shutil
 
 import kagglehub
@@ -31,7 +32,11 @@ SYMBOL_FOLDERS = {
 }
 
 
-def main(max_per_symbol: int = 300):
+# MNIST has ~6000 training images per digit, so ~3000 per operator keeps the
+# digit/operator imbalance to ~2.5x. div only has ~870 images in total, so it
+# stays the smallest class.
+def main(max_per_symbol: int = 3000, seed: int = 42):
+    rng = random.Random(seed)
     dataset_path = kagglehub.dataset_download("xainano/handwrittenmathsymbols")
     images_root = os.path.join(dataset_path, "extracted_images")
 
@@ -50,9 +55,13 @@ def main(max_per_symbol: int = 300):
             continue
 
         out_dir = os.path.join(OUT_ROOT, out_name)
-        os.makedirs(out_dir, exist_ok=True)
+        shutil.rmtree(out_dir, ignore_errors=True)  # drop images from earlier runs
+        os.makedirs(out_dir)
 
-        files = sorted(os.listdir(src_dir))[:max_per_symbol]
+        # random sample, not the first N: the Kaggle files are grouped by
+        # writer, so the first N would only cover a few people's handwriting
+        files = sorted(os.listdir(src_dir))
+        files = rng.sample(files, min(max_per_symbol, len(files)))
         for i, fname in enumerate(files):
             shutil.copyfile(os.path.join(src_dir, fname),
                              os.path.join(out_dir, f"{i:04d}.png"))
