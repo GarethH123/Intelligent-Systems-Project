@@ -16,63 +16,16 @@ import numpy as np
 import pandas as pd
 
 from calculator import calculate
-from data_loader import CLASS_NAMES, load_data
+from data_loader import CLASS_NAMES, load_data, load_operator_data
 from mnist_format import to_mnist_format
-try:  # teammates' modules; the app still runs if they're missing or empty
-    from preprocessing import preprocess
-    from segmentation import segment
-except ImportError:
-    preprocess = segment = None
+from preprocessing import preprocess
+from segmentation import segment
 
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
-# The GUI lists whatever the teammates register in these dicts, so new
-# features show up here without editing app.py:
-#   preprocess.METHODS = {"Name": f(gray_image) -> image}   (applied in order)
-#   segment.METHODS    = {"Name": f(binary_image) -> [{"bbox", "image"}, ...]}
-def _default_preprocess(gray):
-    """Fallback used when no preprocessing is registered: Otsu, ink = 255."""
-    return cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-
-
-def _merge_stacked(boxes):
-    """Merge boxes that sit directly above/below each other (same x-range, small
-    vertical gap) into one, so symbols drawn in several strokes stay whole:
-    the two dots and bar of a division sign, the two bars of an '=', etc.
-    """
-    boxes = list(boxes)
-    merged_any = True
-    while merged_any:
-        merged_any = False
-        for i in range(len(boxes)):
-            for j in range(i + 1, len(boxes)):
-                x1, y1, w1, h1 = boxes[i]
-                x2, y2, w2, h2 = boxes[j]
-                x_overlap = min(x1 + w1, x2 + w2) - max(x1, x2)
-                y_gap = max(y1, y2) - min(y1 + h1, y2 + h2)   # < 0 means they overlap vertically
-                if x_overlap >= 0.5 * min(w1, w2) and -0.1 * min(h1, h2) <= y_gap <= max(w1, w2):
-                    x, y = min(x1, x2), min(y1, y2)
-                    boxes[i] = (x, y, max(x1 + w1, x2 + w2) - x, max(y1 + h1, y2 + h2) - y)
-                    del boxes[j]
-                    merged_any = True
-                    break
-            if merged_any:
-                break
-    return boxes
-
-
-def _default_segment(binary):
-    """Fallback used when no segmentation is registered: one box per contour,
-    with vertically stacked pieces merged, left to right.
-    """
-    contours = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
-    boxes = [b for b in map(cv2.boundingRect, contours) if b[2] * b[3] >= 20]
-    boxes = sorted(_merge_stacked(boxes))
-    return [{"bbox": b, "image": binary[b[1]:b[1] + b[3], b[0]:b[0] + b[2]]} for b in boxes]
-
-
-PRE_METHODS = getattr(preprocess, "METHODS", {}) or {"Default (Otsu)": _default_preprocess}
-SEG_METHODS = getattr(segment, "METHODS", {}) or {"Default (contours)": _default_segment}
+# The GUI lists whatever is registered in preprocess.METHODS / segment.METHODS
+PRE_METHODS = preprocess.METHODS
+SEG_METHODS = segment.METHODS
 
 
 def load_classifier(name):
@@ -102,31 +55,38 @@ def digits_to_image(paths) -> np.ndarray:
     return np.hstack(tiles)
 
 
-def recognise(image, digit_files, model_name, pre_steps, seg_method):
-    if digit_files:  # digit-folder mode takes priority when files are given
-        image = digits_to_image(digit_files)
-    elif image is not None:
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)  # gradio gives RGB
-    else:
-        raise gr.Error("Upload an image or a set of digit images first.")
-
-    predict = load_classifier(model_name)
-
+def run_pipeline(image, predict, pre_steps, seg_method):
+    """image is BGR or gray. Returns (binary, [(crop, label), ...], text, result)."""
     if not pre_steps or seg_method not in SEG_METHODS:
         raise gr.Error("Select at least one preprocessing step and a segmentation method.")
     binary = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    gray = binary  # greyscale before any filtering: crops are cut from this, not from the 1-bit image
     for name in PRE_METHODS:  # fixed order, not click order
         if name in pre_steps:
             binary = PRE_METHODS[name](binary)
-    if binary.mean() > 127:  # models want white ink on black; ink is the minority, so flip
+    if len(np.unique(binary)) > 2:  # no threshold step ticked: segmentation needs a binary image
+        binary = PRE_METHODS["Otsu threshold"](binary)
+    flipped = binary.mean() > 127  # models want white ink on black; ink is the minority, so flip
+    if flipped:
         binary = 255 - binary
+    ink = gray if flipped else 255 - gray  # greyscale, white ink on black
     symbols = SEG_METHODS[seg_method](binary)
     if not symbols:
         return binary, [], "", "No symbols found."
 
-    # same MNIST-style formatting as the training data; pixels stay 0-255
-    # (the MLP's scaler was fitted on raw values, the CNN divides by 255 itself)
-    crops = [to_mnist_format(s["image"]) for s in symbols]
+    # Training images are soft anti-aliased greyscale, and thresholding a thin stroke
+    # to 1-bit then rescaling it changes its shape (a '(' turns into a '1'). So the
+    # threshold only finds the symbols; each crop is cut from the greyscale, masked to
+    # the symbol's own strokes so neighbours and background don't leak in, then mixed
+    # 3:1 with the thresholded crop (pure greyscale lost a little accuracy on digits).
+    # Pixels stay 0-255 (the MLP's scaler was fitted on raw values, the CNN divides by 255).
+    grow = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    crops = []
+    for sym in symbols:
+        x, y, w, h = sym["bbox"]
+        mask = cv2.dilate(sym["image"], grow, iterations=2)
+        soft = cv2.bitwise_and(ink[y:y + h, x:x + w], mask)
+        crops.append(to_mnist_format((0.75 * soft + 0.25 * sym["image"]).astype(np.uint8)))
     batch = np.array([c.reshape(-1) for c in crops], dtype=np.float32)
     labels = [CLASS_NAMES[int(p)] for p in predict(batch)]
     text = "".join(labels)
@@ -138,22 +98,107 @@ def recognise(image, digit_files, model_name, pre_steps, seg_method):
     return binary, list(zip(crops, labels)), text, result
 
 
-_mnist_test = None
+def recognise(image, digit_files, model_name, pre_steps, seg_method):
+    if digit_files:  # digit-folder mode takes priority when files are given
+        image = digits_to_image(digit_files)
+    elif image is not None:
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)  # gradio gives RGB
+    else:
+        raise gr.Error("Upload an image or a set of digit images first.")
+    return run_pipeline(image, load_classifier(model_name), pre_steps, seg_method)
+
+
+_pools = None
+
+
+def _symbol_pools():
+    """{symbol: array of 28x28 white-on-black test images}. Digits come from the
+    MNIST test CSV and operators from the operator test split, so generated
+    images never use anything the models were trained on."""
+    global _pools
+    if _pools is None:  # read the data once, not on every click
+        _, _, X, y = load_data(normalize=False)
+        _, _, op_X, op_y = load_operator_data()
+        X, y = np.concatenate([X, op_X]), np.concatenate([y, op_y])
+        _pools = {name: X[y == i] for i, name in enumerate(CLASS_NAMES)}
+    return _pools
+
+
+def symbols_to_image(text, rng=np.random):
+    """Draw one random test image per character of text, side by side with white gaps."""
+    pools = _symbol_pools()
+    tiles = []
+    for ch in text:
+        img = pools[ch][rng.randint(len(pools[ch]))]
+        if not ch.isdigit():  # clean operator crops are hairlines; thicken like real pen strokes
+            img = cv2.dilate(img, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=2)
+        tile = 255 - cv2.resize(img, (64, 64))
+        tiles.append(cv2.copyMakeBorder(tile, 16, 16, 16, 16, cv2.BORDER_CONSTANT, value=255))
+    return np.hstack(tiles)
+
+
+def random_number(n_digits, rng=np.random):
+    first = str(rng.randint(1, 10)) if n_digits > 1 else str(rng.randint(10))
+    return first + "".join(str(rng.randint(10)) for _ in range(n_digits - 1))
+
+
+def random_expression(n_terms, rng=np.random):
+    """e.g. '12+(7*3)-4': n_terms numbers of 1-2 digits joined by + - * /, with
+    an optional bracketed group. Re-rolled if it divides by zero."""
+    while True:
+        terms = [random_number(rng.randint(1, 3), rng) for _ in range(n_terms)]
+        if n_terms >= 3 and rng.rand() < 0.5:
+            i = rng.randint(0, n_terms - 1)
+            j = rng.randint(i + 2, n_terms + 1)
+            terms[i], terms[j - 1] = "(" + terms[i], terms[j - 1] + ")"
+        text = terms[0]
+        for t in terms[1:]:
+            text += rng.choice(list("+-*/")) + t
+        try:
+            calculate(text)
+            return text
+        except ValueError:
+            continue
 
 
 def generate_number(n_digits):
     """Build a random multi-digit number image from the MNIST test set and
-    show it in the image box. Swap this out for the team's generator when it
-    is ready.
-    """
-    global _mnist_test
-    if _mnist_test is None:  # read the CSV once, not on every click
-        _mnist_test = load_data(normalize=False)[2]
-    X = _mnist_test
-    idx = np.random.choice(len(X), int(n_digits), replace=False)
-    tiles = [cv2.copyMakeBorder(255 - cv2.resize(X[i], (64, 64)), 16, 16, 16, 16,
-                                cv2.BORDER_CONSTANT, value=255) for i in idx]
-    return cv2.cvtColor(np.hstack(tiles), cv2.COLOR_GRAY2RGB)
+    show it in the image box."""
+    return cv2.cvtColor(symbols_to_image(random_number(int(n_digits))), cv2.COLOR_GRAY2RGB)
+
+
+def generate_expression(n_terms):
+    """Same, but a random arithmetic expression with operators and brackets."""
+    return cv2.cvtColor(symbols_to_image(random_expression(int(n_terms))), cv2.COLOR_GRAY2RGB)
+
+
+def batch_test(n_images, kind, size, model_name, pre_steps, seg_method, seed):
+    """Generate n_images random numbers/expressions, run each through the full
+    pipeline and compare with what was drawn. Returns (summary, per-image table)."""
+    if not model_name:
+        raise gr.Error("No trained model found in models/.")
+    rng = np.random.RandomState(int(seed))
+    predict = load_classifier(model_name)
+    rows, n_text, n_seg, n_value, sym_ok, sym_total = [], 0, 0, 0, 0, 0
+    for _ in range(int(n_images)):
+        truth = random_expression(int(size), rng) if kind == "Expressions" else random_number(int(size), rng)
+        _, _, text, result = run_pipeline(symbols_to_image(truth, rng), predict, pre_steps, seg_method)
+        expected = str(calculate(truth))
+        n_text += text == truth
+        n_seg += len(text) == len(truth)
+        n_value += result == expected
+        sym_ok += sum(a == b for a, b in zip(text, truth))
+        sym_total += len(truth)
+        rows.append([truth, text, expected, result, "yes" if text == truth else "NO"])
+    n = int(n_images)
+    summary = pd.DataFrame([
+        ["Exact text match", f"{n_text}/{n}", f"{n_text / n:.1%}"],
+        ["Correct symbol count (segmentation)", f"{n_seg}/{n}", f"{n_seg / n:.1%}"],
+        ["Correct final answer", f"{n_value}/{n}", f"{n_value / n:.1%}"],
+        ["Symbols correct (by position)", f"{sym_ok}/{sym_total}", f"{sym_ok / sym_total:.1%}"],
+    ], columns=["Measure", "Count", "Rate"])
+    table = pd.DataFrame(rows, columns=["Drawn", "Read as", "Expected answer", "Got", "Match"])
+    return summary, table
 
 
 RESULTS_DIR = os.path.join(MODEL_DIR, "results")
@@ -212,9 +257,11 @@ with gr.Blocks(title="Handwritten Number Recognition System") as demo:
                                    file_count="multiple", file_types=["image"], type="filepath")
                 with gr.Row():
                     n_digits = gr.Slider(1, 8, value=4, step=1, label="Digits")
-                    gen_btn = gr.Button("Generate number from dataset")
+                    gen_btn = gr.Button("Generate number")
+                    expr_terms = gr.Slider(2, 5, value=3, step=1, label="Numbers in expression")
+                    expr_btn = gr.Button("Generate expression")
                 model_in = gr.Dropdown(models, value=models[0] if models else None, label="Model")
-                pre_in = gr.CheckboxGroup(list(PRE_METHODS), value=list(PRE_METHODS),
+                pre_in = gr.CheckboxGroup(list(PRE_METHODS), value=["Gaussian blur", "Otsu threshold"],
                                           label="Preprocessing steps")
                 seg_in = gr.Radio(list(SEG_METHODS), value=next(iter(SEG_METHODS), None),
                                   label="Segmentation method")
@@ -224,6 +271,25 @@ with gr.Blocks(title="Handwritten Number Recognition System") as demo:
                 symbols_out = gr.Gallery(label="Segmented symbols + predictions", columns=8)
                 text_out = gr.Textbox(label="Recognised text")
                 result_out = gr.Textbox(label="Result")
+
+    with gr.Tab("Batch Test"):
+        gr.Markdown("Generate many random numbers or expressions from the test images "
+                    "(never the training data), run each through the full pipeline and "
+                    "score the result against what was drawn.")
+        with gr.Row():
+            b_kind = gr.Radio(["Numbers", "Expressions"], value="Expressions", label="Generate")
+            b_n = gr.Slider(5, 200, value=50, step=5, label="How many")
+            b_size = gr.Slider(2, 6, value=3, step=1, label="Digits per number / numbers per expression")
+            b_seed = gr.Number(value=0, precision=0, label="Seed (same seed = same test set)")
+        with gr.Row():
+            b_model = gr.Dropdown(models, value=models[0] if models else None, label="Model")
+            b_pre = gr.CheckboxGroup(list(PRE_METHODS), value=["Gaussian blur", "Otsu threshold"],
+                                     label="Preprocessing steps")
+            b_seg = gr.Radio(list(SEG_METHODS), value=next(iter(SEG_METHODS), None),
+                             label="Segmentation method")
+        b_btn = gr.Button("Run batch test", variant="primary")
+        b_summary = gr.Dataframe(label="Summary", interactive=False)
+        b_table = gr.Dataframe(label="Every test", interactive=False)
 
     with gr.Tab("Model Comparison"):
         gr.Markdown("Saved by each `models/*_model.py` script when it is trained. "
@@ -238,6 +304,8 @@ with gr.Blocks(title="Handwritten Number Recognition System") as demo:
         per_class_out = gr.Dataframe(label="Per-class results", interactive=False)
 
     gen_btn.click(generate_number, n_digits, image_in)
+    expr_btn.click(generate_expression, expr_terms, image_in)
+    b_btn.click(batch_test, [b_n, b_kind, b_size, b_model, b_pre, b_seg, b_seed], [b_summary, b_table])
     run_btn.click(recognise, [image_in, files_in, model_in, pre_in, seg_in],
                   [binary_out, symbols_out, text_out, result_out])
     pick.change(show_model, pick, [cm_img, hist_img, per_class_out])
