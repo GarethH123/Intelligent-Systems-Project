@@ -18,7 +18,7 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.utils.class_weight import compute_sample_weight
 
-# lets "import data_loader" work when this file is run straight from models/.
+# lets "import data_loader" work when this file is run straight from models.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data_loader import load_combined_data, CLASS_NAMES
 from evaluation import cross_validate, evaluate, plot_history
