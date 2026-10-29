@@ -3,7 +3,7 @@ CNN for MNIST digits + handwritten operators - the convolutional model in the
 comparison, trained on the same combined 16-class dataset (0-9, + - * / ( ))
 as the MLP and scored with the same evaluation (models/evaluation.py).
 
-  1. Define the CNN (3 x conv+maxpool -> dense 256 -> softmax), from CNNFinished.ipynb
+  1. Define the CNN (3 x conv+maxpool -> dense 256 -> softmax), from archive/CNNFinished.ipynb
   2. Train with a validation split and early stopping (best weights restored)
   3. Evaluate: accuracy, weighted F1, classification report, confusion matrix
   4. Cross-validate: 5-fold stratified, weighted F1

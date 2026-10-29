@@ -5,3 +5,4 @@ tensorflow
 opencv-python
 gradio
 matplotlib
+kagglehub

@@ -1,6 +1,6 @@
 """Preprocessing steps for the GUI. Each takes and returns a uint8 grayscale image.
 
-Noise-reduction filters come from Data_Preprocessing_methods.ipynb (Gaussian,
+Noise-reduction filters come from archive/Data_Preprocessing_methods.ipynb (Gaussian,
 median and bilateral were compared there); Otsu turns the result into a binary
 image with ink = 255, which segmentation needs. The GUI applies the ticked steps
 in the order listed here.

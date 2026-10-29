@@ -9,6 +9,8 @@ import glob
 import json
 import os
 import pickle
+import subprocess
+import sys
 
 import cv2
 import gradio as gr
@@ -244,8 +246,51 @@ def refresh_comparison():
     return comparison_table(), gr.Dropdown(choices=names, value=names[0] if names else None)
 
 
-models = [os.path.basename(p) for ext in ("*.pkl", "*.keras")
-          for p in glob.glob(os.path.join(MODEL_DIR, ext))]
+def list_models():
+    """Saved model files, CNN (the chosen model) first so it is the default."""
+    found = [os.path.basename(p) for ext in ("*.pkl", "*.keras")
+             for p in glob.glob(os.path.join(MODEL_DIR, ext))]
+    return sorted(found, key=lambda n: (not n.endswith(".keras"), n))
+
+
+models = list_models()
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+TRAIN_SCRIPTS = {"CNN": "cnn_model.py", "MLP": "mlp_model.py", "Random Forest": "random_forest_model.py"}
+DATA_SCRIPTS = {"MNIST digits": "download_mnist.py", "Operator symbols (Kaggle)": "prepare_kaggle_operators.py"}
+
+
+def run_script(path):
+    """Run a python script from the project root, yielding its output so far."""
+    log = f"$ python {os.path.relpath(path, ROOT)}\n"
+    yield log
+    proc = subprocess.Popen([sys.executable, "-u", path], cwd=ROOT, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, errors="replace")
+    for line in proc.stdout:
+        log += line
+        yield log[-20000:]
+    code = proc.wait()
+    yield log[-20000:] + (f"\nFinished OK." if code == 0 else f"\nFAILED (exit code {code}).")
+
+
+def train_model(which):
+    """Run a training script, then refresh every model list and the results."""
+    for log in run_script(os.path.join(ROOT, "models", TRAIN_SCRIPTS[which])):
+        yield log, gr.skip(), gr.skip(), gr.skip()
+    names, new_models = list(load_metrics()), list_models()
+    drop = gr.Dropdown(choices=new_models, value=new_models[0] if new_models else None)
+    yield (log,
+           gr.Dropdown(choices=names, value=which_metrics_name(which, names)), drop, drop)
+
+
+def which_metrics_name(which, names):
+    """Metrics name of the model just trained (falls back to the first)."""
+    key = which.replace(" ", "").lower()
+    return next((n for n in names if n.lower() == key), names[0] if names else None)
+
+
+def download_data(which):
+    yield from run_script(os.path.join(ROOT, "data", DATA_SCRIPTS[which]))
 
 with gr.Blocks(title="Handwritten Number Recognition System") as demo:
     gr.Markdown("# Handwritten Number Recognition System")
@@ -303,6 +348,28 @@ with gr.Blocks(title="Handwritten Number Recognition System") as demo:
             hist_img = gr.Image(label="Training history")
         per_class_out = gr.Dataframe(label="Per-class results", interactive=False)
 
+    with gr.Tab("Train & Data"):
+        gr.Markdown("Runs the project scripts for you and shows their output live. "
+                    "Download the datasets first, then train. Training can take several minutes.")
+        gr.Markdown("### 1. Download datasets")
+        gr.Markdown("**Note:** the operator symbols dataset is a `.rar` archive. Install "
+                    "[7-Zip](https://www.7-zip.org/) or unrar first, otherwise the extraction can "
+                    "silently stall and you only get a partial download (some symbol folders missing).")
+        with gr.Row():
+            data_pick = gr.Dropdown(list(DATA_SCRIPTS), value=next(iter(DATA_SCRIPTS)), label="Dataset")
+            data_btn = gr.Button("Download dataset")
+        data_log = gr.Textbox(label="Download output", lines=8, max_lines=8, autoscroll=True)
+        gr.Markdown("### 2. Train a model")
+        with gr.Row():
+            train_pick = gr.Dropdown(list(TRAIN_SCRIPTS), value="CNN", label="Model")
+            train_btn = gr.Button("Train model", variant="primary")
+        train_log = gr.Textbox(label="Training output", lines=12, max_lines=12, autoscroll=True)
+        gr.Markdown("When training finishes, the results appear in the Model Comparison tab.")
+
+    data_btn.click(download_data, data_pick, data_log)
+    train_btn.click(train_model, train_pick, [train_log, pick, model_in, b_model]).then(
+        show_model, pick, [cm_img, hist_img, per_class_out]).then(
+        comparison_table, None, table)
     gen_btn.click(generate_number, n_digits, image_in)
     expr_btn.click(generate_expression, expr_terms, image_in)
     b_btn.click(batch_test, [b_n, b_kind, b_size, b_model, b_pre, b_seg, b_seed], [b_summary, b_table])
