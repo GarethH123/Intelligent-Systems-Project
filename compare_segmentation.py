@@ -85,7 +85,7 @@ def add_noise(img, rng, sigma, speckle):
 # ---------------------------------------------------------------- standardised stand-in preprocessing
 def to_binary(gray):
     """Blur -> Otsu threshold -> drop tiny specks. Same for every method, so the
-    comparison is about segmentation, not preprocessing."""
+    comparison is about segmentation."""
     blur = cv2.GaussianBlur(gray, (3, 3), 0)
     _, binary = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
@@ -98,7 +98,7 @@ def to_binary(gray):
 
 # ---------------------------------------------------------------- the three methods
 def seg_connected_components(binary):
-    """Every 8-connected blob of ink is one symbol. Fails when digits touch (merge)."""
+    """Every 8-connected blob of ink is one symbol. Fails when digits intersect (merge)."""
     n, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     boxes = [(int(x), int(y), int(w), int(h)) for x, y, w, h, _ in stats[1:]]
     return sorted(boxes)
@@ -157,7 +157,7 @@ METHODS = {
 
 def as_symbols(method):
     """Wrap a method as binary_image -> [{"bbox", "image"}, ...], the format app.py
-    describes for segment.METHODS (check it matches your segmentation/segment.py)."""
+    describes for segment.METHODS."""
     def wrapped(binary):
         return [{"bbox": b, "image": binary[b[1]:b[1] + b[3], b[0]:b[0] + b[2]]}
                 for b in method(binary)]
@@ -213,7 +213,7 @@ def load_classifier():
 
 
 def read_number(binary, boxes, saved):
-    """Crop each box, format like MNIST, classify, join into a string (as app.py does)."""
+    """Crop each box, format like MNIST, classify, join into a string."""
     if not boxes:
         return ""
     crops = [to_mnist_format(binary[y:y + h, x:x + w]) for x, y, w, h in boxes]
