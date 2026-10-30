@@ -33,6 +33,27 @@ def merge_stacked(boxes):
     return boxes
 
 
+def connected_components_segment(binary):
+    """One box per 8-connected blob of ink, with vertically stacked pieces merged,
+    left to right."""
+    n, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    boxes = [(int(x), int(y), int(w), int(h)) for x, y, w, h, _ in stats[1:]   # row 0 = background
+             if w * h >= 20]
+    boxes = sorted(merge_stacked(boxes))
+    return [{"bbox": b, "image": binary[b[1]:b[1] + b[3], b[0]:b[0] + b[2]]} for b in boxes]
+
+
+METHODS = {"Connected components (merge stacked)": connected_components_segment}
+
+
+
+
+
+
+
+
+
+'''
 def contour_segment(binary):
     """One box per contour, with vertically stacked pieces merged, left to right."""
     contours = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
@@ -42,3 +63,4 @@ def contour_segment(binary):
 
 
 METHODS = {"Contours (merge stacked)": contour_segment}
+'''
