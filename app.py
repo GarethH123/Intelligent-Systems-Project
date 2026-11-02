@@ -57,6 +57,20 @@ def digits_to_image(paths) -> np.ndarray:
     return np.hstack(tiles)
 
 
+THICKEN_TARGET = 60  # min pixels brighter than 64 in a 28x28 crop; 0 turns thickening off
+THICKEN_MAX_STEPS = 2
+
+
+def thicken_to_target(crop, target=None):
+    target = THICKEN_TARGET if target is None else target
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    for _ in range(THICKEN_MAX_STEPS):
+        if (crop > 64).sum() >= target:
+            break
+        crop = cv2.dilate(crop, kernel)
+    return crop
+
+
 def run_pipeline(image, predict, pre_steps, seg_method):
     """image is BGR or gray. Returns (binary, [(crop, label), ...], text, result)."""
     if not pre_steps or seg_method not in SEG_METHODS:
@@ -88,7 +102,7 @@ def run_pipeline(image, predict, pre_steps, seg_method):
         x, y, w, h = sym["bbox"]
         mask = cv2.dilate(sym["image"], grow, iterations=2)
         soft = cv2.bitwise_and(ink[y:y + h, x:x + w], mask)
-        crops.append(to_mnist_format((0.75 * soft + 0.25 * sym["image"]).astype(np.uint8)))
+        crops.append(thicken_to_target(to_mnist_format((0.75 * soft + 0.25 * sym["image"]).astype(np.uint8))))
     batch = np.array([c.reshape(-1) for c in crops], dtype=np.float32)
     labels = [CLASS_NAMES[int(p)] for p in predict(batch)]
     text = "".join(labels)
